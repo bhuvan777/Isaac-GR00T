@@ -7,6 +7,7 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
     CategorySpecificMLP,
     MultiEmbodimentActionEncoder,
 )
+from gr00t.model.modules.sheaf_streams import SVMSWrapper  # SVMS integration
 import torch
 from torch import nn
 from torch.distributions import Beta
@@ -453,6 +454,25 @@ class Gr00tN1d6(PreTrainedModel):
 
         # Initialize action head
         self.action_head = Gr00tN1d6ActionHead(config)
+
+        # Initialize SVMS wrapper if enabled
+        if config.use_sheaf_streams:
+            self.svms_wrapper = SVMSWrapper(
+                d_vlm=config.backbone_embedding_dim,
+                d_stream=config.d_stream,
+                d_overlap=config.d_overlap,
+                adapter_rank=config.adapter_rank,
+                dropout=config.attn_dropout,
+                use_aux_losses=config.use_aux_losses,
+            )
+            print(f"✓ SVMS enabled with {config.n_streams} specialized streams:")
+            print(f"  - Stream A: Visual scene reasoning")
+            print(f"  - Stream B: Temporal planning")
+            print(f"  - Stream C: State tracking")
+            print(f"  - d_stream={config.d_stream}, d_overlap={config.d_overlap}, rank={config.adapter_rank}")
+        else:
+            self.svms_wrapper = None
+
         from .processing_gr00t_n1d6 import Gr00tN1d6DataCollator
 
         self.collator = Gr00tN1d6DataCollator(
@@ -460,6 +480,20 @@ class Gr00tN1d6(PreTrainedModel):
             model_type=config.backbone_model_type,
             transformers_loading_kwargs=transformers_loading_kwargs,
         )
+
+    def _compute_router_temperature(self, step: int) -> float:
+        """
+        Compute router temperature based on training step.
+        Temperature anneals from init (soft routing) to final (sharp routing).
+        """
+        if step >= self.config.router_temp_decay_steps:
+            return self.config.router_temp_final
+
+        frac = step / self.config.router_temp_decay_steps
+        temp = self.config.router_temp_init + frac * (
+            self.config.router_temp_final - self.config.router_temp_init
+        )
+        return temp
 
     def prepare_input(self, inputs: dict) -> Tuple[BatchFeature, BatchFeature]:
         """Prepare inputs for backbone and action head."""
@@ -501,6 +535,8 @@ class Gr00tN1d6(PreTrainedModel):
             inputs: Dictionary containing:
                 - Eagle inputs (prefixed with 'eagle_')
                 - Action inputs (state, action, embodiment_id, etc.)
+                - (Optional) aux_labels_A/B/C: Auxiliary labels for stream specialization
+                - (Optional) training_step: Current training step for scheduling
 
         Returns:
             BatchFeature containing loss and other outputs
@@ -508,19 +544,95 @@ class Gr00tN1d6(PreTrainedModel):
         # Prepare inputs for backbone and action head
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
+
+        # Apply SVMS if enabled
+        if self.svms_wrapper is not None:
+            # Get training step for scheduling (default to 0 for inference)
+            training_step = inputs.get("training_step", 0)
+            router_temperature = self._compute_router_temperature(training_step)
+
+            # Extract attention mask (handle both dict and BatchFeature)
+            if hasattr(backbone_inputs, "attention_mask"):
+                attention_mask = backbone_inputs.attention_mask
+            elif isinstance(backbone_inputs, dict) and "attention_mask" in backbone_inputs:
+                attention_mask = backbone_inputs["attention_mask"]
+            else:
+                # Create default mask if not available
+                batch_size, seq_len = backbone_outputs["backbone_features"].shape[:2]
+                attention_mask = torch.ones(
+                    batch_size, seq_len,
+                    device=backbone_outputs["backbone_features"].device
+                )
+
+            # Apply SVMS wrapper
+            svms_outputs = self.svms_wrapper(
+                backbone_features=backbone_outputs["backbone_features"],
+                attention_mask=attention_mask,
+                sheaf_unroll_steps=self.config.sheaf_unroll_steps,
+                router_temperature=router_temperature,
+                aux_labels_A=inputs.get("aux_labels_A"),
+                aux_labels_B=inputs.get("aux_labels_B"),
+                aux_labels_C=inputs.get("aux_labels_C"),
+            )
+
+            # Replace backbone features with SVMS-refined features
+            backbone_outputs["backbone_features"] = svms_outputs["refined_features"]
+
+            # Store SVMS outputs for loss computation (will be used by trainer)
+            backbone_outputs["svms_outputs"] = svms_outputs
+
+        # Forward through action head
         action_outputs = self.action_head(backbone_outputs, action_inputs)
+
+        # Merge SVMS outputs into action outputs if present
+        if self.svms_wrapper is not None and "svms_outputs" in backbone_outputs:
+            action_outputs["svms_outputs"] = backbone_outputs["svms_outputs"]
 
         return action_outputs
 
     def get_action(self, inputs: dict) -> BatchFeature:
         """
-        Generate actions using the complete model.
+        Generate actions using the complete model (inference mode).
+        SVMS is applied if enabled, using inference temperature.
         """
         # Prepare inputs for backbone and action head
         backbone_inputs, action_inputs = self.prepare_input(inputs)
 
         # Forward through backbone
         backbone_outputs = self.backbone(backbone_inputs)
+
+        # Apply SVMS if enabled (inference mode)
+        if self.svms_wrapper is not None:
+            # Use final temperature for inference (sharp routing)
+            router_temperature = self.config.router_temp_final
+
+            # Extract attention mask
+            if hasattr(backbone_inputs, "attention_mask"):
+                attention_mask = backbone_inputs.attention_mask
+            elif isinstance(backbone_inputs, dict) and "attention_mask" in backbone_inputs:
+                attention_mask = backbone_inputs["attention_mask"]
+            else:
+                batch_size, seq_len = backbone_outputs["backbone_features"].shape[:2]
+                attention_mask = torch.ones(
+                    batch_size, seq_len,
+                    device=backbone_outputs["backbone_features"].device
+                )
+
+            # Apply SVMS (no auxiliary labels in inference)
+            svms_outputs = self.svms_wrapper(
+                backbone_features=backbone_outputs["backbone_features"],
+                attention_mask=attention_mask,
+                sheaf_unroll_steps=self.config.sheaf_unroll_steps,
+                router_temperature=router_temperature,
+                aux_labels_A=None,  # No aux labels during inference
+                aux_labels_B=None,
+                aux_labels_C=None,
+            )
+
+            # Replace backbone features with refined SVMS features
+            backbone_outputs["backbone_features"] = svms_outputs["refined_features"]
+
+        # Generate action
         action_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
 
         return action_outputs

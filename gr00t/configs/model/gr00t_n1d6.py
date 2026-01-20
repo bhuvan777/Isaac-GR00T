@@ -101,6 +101,36 @@ class Gr00tN1d6Config(PretrainedConfig):
     # Multi-embodiment parameters
     max_num_embodiments: int = 32
 
+    # ==================== SVMS (Sheaf-based Multi-Stream) Parameters ====================
+    # Enable sheaf-based multi-stream architecture for specialized processing
+    use_sheaf_streams: bool = False  # Set to True to enable SVMS
+
+    # Stream architecture
+    n_streams: int = 3  # Number of specialized streams (Visual, Temporal, State)
+    d_stream: int = 768  # Dimension of each stream
+    d_overlap: int = 384  # Dimension of overlap spaces
+    adapter_rank: int = 128  # Bottleneck rank for low-rank adapters
+
+    # Sheaf consistency
+    lambda_sheaf_max: float = 0.1  # Maximum sheaf loss weight
+    lambda_sheaf_min: float = 0.01  # Minimum sheaf loss weight (during warmup)
+    sheaf_unroll_steps: int = 1  # Number of iterative correction steps
+    sheaf_schedule_mode: str = "adaptive"  # "adaptive", "linear", or "fixed"
+    sheaf_delay_until_diffusion: float = 0.4  # Start sheaf when diffusion loss < this
+
+    # Auxiliary supervision (stream specialization)
+    use_aux_losses: bool = True  # Enable auxiliary classification losses
+    lambda_aux: float = 0.3  # Auxiliary loss weight
+    aux_warmup_steps: int = 5000  # Warmup steps for auxiliary loss
+
+    # Router configuration
+    router_temp_init: float = 2.0  # Initial temperature (soft routing)
+    router_temp_final: float = 0.5  # Final temperature (sharp routing)
+    router_temp_decay_steps: int = 15000  # Steps to decay from init to final
+    router_balance_weight: float = 0.01  # Weight for load balancing loss
+    router_stream_dropout_p: float = 0.15  # Dropout probability for streams
+    # ==================================================================================
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():
