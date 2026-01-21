@@ -25,6 +25,14 @@ from transformers.trainer import TRAINER_STATE_NAME, Trainer, TrainerState, get_
 from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalPrediction
 
+# Import for SVMS auxiliary label generation
+try:
+    from gr00t.data.robocasa_data_collator_with_aux import generate_aux_labels_in_trainer
+    HAS_AUX_LABELS = True
+except ImportError:
+    HAS_AUX_LABELS = False
+    logging.warning("Could not import auxiliary label generator. SVMS training may not work properly.")
+
 
 class ProfCallback(TrainerCallback):
     def __init__(self, prof):
@@ -190,6 +198,16 @@ class Gr00tTrainer(Trainer):
         """
         self.action_offset = kwargs.pop("action_offset", None)
         self.multiprocessing_context = kwargs.pop("multiprocessing_context", "fork")
+
+        # SVMS-specific parameters
+        self.use_svms = kwargs.pop("use_svms", False)
+        self.lambda_aux = kwargs.pop("lambda_aux", 0.3)
+        self.lambda_sheaf_max = kwargs.pop("lambda_sheaf_max", 0.1)
+        self.lambda_sheaf_min = kwargs.pop("lambda_sheaf_min", 0.01)
+        self.sheaf_schedule_mode = kwargs.pop("sheaf_schedule_mode", "adaptive")
+        self.sheaf_delay_until_diffusion = kwargs.pop("sheaf_delay_until_diffusion", 0.4)
+        self.aux_warmup_steps = kwargs.pop("aux_warmup_steps", 5000)
+
         super().__init__(
             *args,
             **kwargs,
@@ -202,6 +220,68 @@ class Gr00tTrainer(Trainer):
         self.state.epoch = None
         super().log(logs, start_time=start_time)
         self.state.epoch = epoch
+
+    # ------------------------------------------------------------------
+    # SVMS-specific helper methods
+    # ------------------------------------------------------------------
+
+    def _compute_lambda_sheaf(self, step: int) -> float:
+        """
+        Compute sheaf consistency weight using adaptive scheduling.
+
+        Args:
+            step: Current training step
+
+        Returns:
+            Lambda value for sheaf loss
+        """
+        if not self.use_svms:
+            return 0.0
+
+        if self.sheaf_schedule_mode == "off":
+            return 0.0
+
+        # Delay sheaf until main training is progressing
+        total_steps = self.state.max_steps if self.state.max_steps > 0 else 10000
+        delay_step = int(total_steps * self.sheaf_delay_until_diffusion)
+
+        if step < delay_step:
+            return 0.0
+
+        # Ramp up sheaf weight
+        if self.sheaf_schedule_mode == "adaptive":
+            # Gradual increase from min to max
+            progress = (step - delay_step) / (total_steps - delay_step)
+            progress = min(progress, 1.0)
+            lambda_sheaf = self.lambda_sheaf_min + progress * (
+                self.lambda_sheaf_max - self.lambda_sheaf_min
+            )
+        elif self.sheaf_schedule_mode == "constant":
+            lambda_sheaf = self.lambda_sheaf_max
+        else:
+            lambda_sheaf = 0.0
+
+        return lambda_sheaf
+
+    def _compute_lambda_aux(self, step: int) -> float:
+        """
+        Compute auxiliary loss weight with warmup.
+
+        Args:
+            step: Current training step
+
+        Returns:
+            Lambda value for auxiliary losses
+        """
+        if not self.use_svms:
+            return 0.0
+
+        if step >= self.aux_warmup_steps:
+            return self.lambda_aux
+
+        # Linear warmup
+        warmup_frac = step / self.aux_warmup_steps
+        return self.lambda_aux * warmup_frac
 
     def get_train_dataloader(self):  # noqa: D401
         """Return a iterable dataloader without skipping the data during resume, but reseed the dataset instead."""
@@ -283,7 +363,31 @@ class Gr00tTrainer(Trainer):
         functions, etc.) to the parent ``Trainer.compute_loss`` implementation
         by calling it with ``return_outputs=True``.  After obtaining the loss
         *and* model outputs, we calculate accuracy and push it to the logger.
+
+        SVMS Extension:
+        - Generates auxiliary labels if not present in batch
+        - Adds SVMS losses (sheaf consistency + auxiliary supervision)
+        - Logs stream-specific metrics
         """
+
+        # --------------------------------------------------------------
+        # SVMS: Generate auxiliary labels if needed
+        # --------------------------------------------------------------
+        if self.use_svms and HAS_AUX_LABELS and model.training:
+            # Check if auxiliary labels are already in batch
+            if "aux_labels_A" not in inputs:
+                # Generate on-the-fly
+                try:
+                    aux_labels = generate_aux_labels_in_trainer(
+                        inputs,
+                        self.tokenizer if hasattr(self, "tokenizer") else None
+                    )
+                    inputs.update(aux_labels)
+                except Exception as e:
+                    logging.warning(f"Failed to generate auxiliary labels: {e}")
+
+            # Pass training step to model for router temperature scheduling
+            inputs["training_step"] = self.state.global_step
 
         # Use parent implementation to preserve built-in functionality.
         loss, outputs = super().compute_loss(
@@ -292,12 +396,33 @@ class Gr00tTrainer(Trainer):
             return_outputs=True,
             num_items_in_batch=num_items_in_batch,
         )
-        # import ipdb; ipdb.set_trace()
-        # # save the model's embedding for the first step
-        # input_embeddings = model.get_input_embeddings().weight.data.cpu()
-        # output_embeddings = model.get_output_embeddings().weight.data.cpu()
-        # torch.save(input_embeddings, f"input_embeddings_{self.state.global_step}.pt")
-        # torch.save(output_embeddings, f"output_embeddings_{self.state.global_step}.pt")
+
+        # --------------------------------------------------------------
+        # SVMS: Add sheaf and auxiliary losses
+        # --------------------------------------------------------------
+        if self.use_svms and model.training and hasattr(outputs, "svms_outputs"):
+            svms_outputs = outputs.svms_outputs
+
+            # Compute scheduling weights
+            lambda_sheaf = self._compute_lambda_sheaf(self.state.global_step)
+            lambda_aux = self._compute_lambda_aux(self.state.global_step)
+
+            # Sheaf consistency loss
+            if lambda_sheaf > 0 and "loss_sheaf" in svms_outputs:
+                loss_sheaf = svms_outputs["loss_sheaf"]
+                loss = loss + lambda_sheaf * loss_sheaf
+
+            # Auxiliary supervision losses
+            if lambda_aux > 0:
+                aux_losses = []
+                for stream in ["A", "B", "C"]:
+                    loss_key = f"loss_aux_{stream}"
+                    if loss_key in svms_outputs:
+                        aux_losses.append(svms_outputs[loss_key])
+
+                if len(aux_losses) > 0:
+                    loss_aux_total = sum(aux_losses) / len(aux_losses)
+                    loss = loss + lambda_aux * loss_aux_total
 
         # Record last loss for testing purposes.
         self.loss = loss
@@ -321,7 +446,36 @@ class Gr00tTrainer(Trainer):
             acc_tensor = torch.tensor(acc_local.item(), device=loss.device)
             acc_mean = self._nested_gather(acc_tensor).mean().item()
 
+            logs = {"train_accuracy": acc_mean}
+
+            # --------------------------------------------------------------
+            # SVMS: Log stream-specific metrics
+            # --------------------------------------------------------------
+            if self.use_svms and hasattr(outputs, "svms_outputs"):
+                svms_outputs = outputs.svms_outputs
+
+                # Log loss components
+                if "loss_sheaf" in svms_outputs:
+                    logs["loss_sheaf"] = svms_outputs["loss_sheaf"].item()
+                    logs["lambda_sheaf"] = self._compute_lambda_sheaf(self.state.global_step)
+
+                # Log auxiliary accuracies
+                for stream in ["A", "B", "C"]:
+                    acc_key = f"aux_acc_{stream}"
+                    if acc_key in svms_outputs:
+                        logs[acc_key] = svms_outputs[acc_key].item()
+
+                # Log router weights
+                if "router_weights" in svms_outputs:
+                    weights = svms_outputs["router_weights"]  # (B, T, 3)
+                    mean_weights = weights.mean(dim=[0, 1])  # (3,)
+                    logs["router_weight_A"] = mean_weights[0].item()
+                    logs["router_weight_B"] = mean_weights[1].item()
+                    logs["router_weight_C"] = mean_weights[2].item()
+
+                logs["lambda_aux"] = self._compute_lambda_aux(self.state.global_step)
+
             if self.args.local_rank in (-1, 0):
-                self.log({"train_accuracy": acc_mean})
+                self.log(logs)
 
         return (loss, outputs) if return_outputs else loss
