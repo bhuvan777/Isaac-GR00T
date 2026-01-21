@@ -30,8 +30,12 @@ def find_model_statistics_file(model_path: str) -> Path:
         raise FileNotFoundError(f"statistics.json not found in {model_path}")
 
     # Case 2: HuggingFace model identifier - check cache
-    # HF cache is typically at ~/.cache/huggingface/hub/
-    hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
+    # Check HF_HOME first, then default cache
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        hf_cache = Path(hf_home) / "hub"
+    else:
+        hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
 
     # Convert model name to cache format: nvidia/GR00T-N1.6-3B -> models--nvidia--GR00T-N1.6-3B
     cache_name = "models--" + str(model_path).replace("/", "--")
@@ -50,14 +54,31 @@ def find_model_statistics_file(model_path: str) -> Path:
     )
 
 
-def load_dataset_stats(dataset_path: Path) -> dict:
-    """Load statistics from the dataset's meta/stats.json file."""
+def load_dataset_files(dataset_path: Path) -> tuple[dict, dict]:
+    """Load both stats.json and modality.json from the dataset."""
     stats_file = dataset_path / "meta" / "stats.json"
+    modality_file = dataset_path / "meta" / "modality.json"
+
     if not stats_file.exists():
         raise FileNotFoundError(f"Dataset stats not found at {stats_file}")
+    if not modality_file.exists():
+        raise FileNotFoundError(f"Dataset modality not found at {modality_file}")
 
     with open(stats_file, "r") as f:
-        return json.load(f)
+        stats = json.load(f)
+    with open(modality_file, "r") as f:
+        modality = json.load(f)
+
+    return stats, modality
+
+
+def extract_stats_slice(flat_stats: dict, start: int, end: int) -> dict:
+    """Extract a slice of statistics for a specific key."""
+    result = {}
+    for stat_name in ["mean", "std", "min", "max", "q01", "q99"]:
+        if stat_name in flat_stats:
+            result[stat_name] = flat_stats[stat_name][start:end]
+    return result
 
 
 def main():
@@ -107,39 +128,61 @@ def main():
     # Check if embodiment already exists
     if args.embodiment_tag in model_stats:
         print(f"\n⚠️  Warning: '{args.embodiment_tag}' already exists in model statistics")
-        response = input("   Overwrite? (y/n): ").strip().lower()
-        if response != "y":
-            print("   Cancelled.")
-            return 0
+        print("   Overwriting...")
 
-    # Load dataset statistics
-    print(f"\n📂 Loading dataset statistics...")
+    # Load dataset files
+    print(f"\n📂 Loading dataset statistics and modality mapping...")
     dataset_path = Path(args.dataset_path)
     try:
-        dataset_stats = load_dataset_stats(dataset_path)
-        print(f"✓ Loaded dataset statistics")
+        dataset_stats, modality_config = load_dataset_files(dataset_path)
+        print(f"✓ Loaded dataset files")
     except FileNotFoundError as e:
         print(f"❌ Error: {e}")
         return 1
 
     # Verify required keys exist
-    required_keys = ["observation.state", "action"]
-    missing_keys = [key for key in required_keys if key not in dataset_stats]
-    if missing_keys:
-        print(f"❌ Error: Missing required keys in dataset stats: {missing_keys}")
+    if "observation.state" not in dataset_stats:
+        print(f"❌ Error: 'observation.state' not found in stats.json")
+        return 1
+    if "action" not in dataset_stats:
+        print(f"❌ Error: 'action' not found in stats.json")
         return 1
 
-    if "relative_action" not in dataset_stats:
-        print(f"❌ Error: 'relative_action' not found in dataset stats")
-        print(f"   Run: python scripts/fix_robocasa_stats.py --dataset-path {dataset_path}")
-        return 1
+    # Parse state statistics from flat array to per-key dicts
+    print(f"\n📊 Parsing state statistics...")
+    state_stats = {}
+    for key, info in modality_config["state"].items():
+        start = info["start"]
+        end = info["end"]
+        state_stats[key] = extract_stats_slice(dataset_stats["observation.state"], start, end)
+        print(f"   ✓ {key}: indices [{start}:{end}]")
 
-    # Prepare embodiment statistics
-    print(f"\n📊 Preparing embodiment statistics for '{args.embodiment_tag}'...")
+    # Parse action statistics from flat array to per-key dicts
+    print(f"\n📊 Parsing action statistics...")
+    action_stats = {}
+    for key, info in modality_config["action"].items():
+        start = info["start"]
+        end = info["end"]
+        action_stats[key] = extract_stats_slice(dataset_stats["action"], start, end)
+        print(f"   ✓ {key}: indices [{start}:{end}]")
+
+    # For relative_action, we use the same keys as action
+    # Map the action keys to our modality config keys
+    print(f"\n📊 Preparing relative action statistics...")
+    relative_action_stats = {
+        "end_effector_position": extract_stats_slice(dataset_stats["action"], 5, 8),
+        "end_effector_rotation": extract_stats_slice(dataset_stats["action"], 8, 11),
+        "gripper_close": extract_stats_slice(dataset_stats["action"], 11, 12),
+    }
+    for key in relative_action_stats:
+        print(f"   ✓ {key}")
+
+    # Prepare embodiment statistics in the correct format
+    print(f"\n📦 Assembling embodiment statistics for '{args.embodiment_tag}'...")
     embodiment_stats = {
-        "observation.state": dataset_stats["observation.state"],
-        "action": dataset_stats["action"],
-        "relative_action": dataset_stats["relative_action"],
+        "state": state_stats,
+        "action": action_stats,
+        "relative_action": relative_action_stats,
     }
 
     # Add to model statistics
@@ -160,7 +203,10 @@ def main():
     print("✅ Success!")
     print("=" * 80)
     print(f"\nAdded statistics for embodiment: {args.embodiment_tag}")
-    print(f"Model now supports {len(model_stats)} embodiments:")
+    print(f"  - state: {len(state_stats)} keys")
+    print(f"  - action: {len(action_stats)} keys")
+    print(f"  - relative_action: {len(relative_action_stats)} keys")
+    print(f"\nModel now supports {len(model_stats)} embodiments:")
     for tag in sorted(model_stats.keys()):
         print(f"  - {tag}")
 
