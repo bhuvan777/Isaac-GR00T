@@ -394,18 +394,21 @@ ROBOCASA_PANDA_OMRON_CONFIG = {
                 rep=ActionRepresentation.RELATIVE,
                 type=ActionType.EEF,
                 format=ActionFormat.DEFAULT,
+                state_key="end_effector_position_relative",
             ),
             # end_effector_rotation (relative/delta, axis-angle format)
             ActionConfig(
                 rep=ActionRepresentation.RELATIVE,
                 type=ActionType.EEF,
                 format=ActionFormat.XYZ_ROTVEC,  # axis-angle = rotation vector
+                state_key="end_effector_rotation_relative",
             ),
             # gripper_close (binary: 0=open, 1=close)
             ActionConfig(
                 rep=ActionRepresentation.ABSOLUTE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
+                state_key="gripper_qpos",
             ),
         ],
     ),
