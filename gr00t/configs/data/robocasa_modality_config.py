@@ -3,19 +3,20 @@ RoboCasa Modality Configuration for GR00T N1.6
 
 Defines embodiment-specific configurations for RoboCasa Panda robot with Omron gripper.
 
-This configuration specifies:
-- State dimensions and action dimensions
-- Camera configurations
-- Normalization parameters (computed from dataset)
-- Action space type (relative vs absolute)
-- Embodiment-specific settings
+This module provides two configs:
+1. ROBOCASA_PANDA_OMRON_CONFIG: The proper ModalityConfig structure for GR00T training
+   - Contains video, state, action, and language modality configurations
+   - Used by the training system (automatically registered)
+
+2. ROBOCASA_PANDA_OMRON_METADATA: Metadata and documentation (legacy dict format)
+   - Contains camera specs, normalization params, action space details
+   - Used for reference and documentation
 
 Usage:
-    from gr00t.configs.data.robocasa_modality_config import ROBOCASA_PANDA_OMRON
-
-    config = ROBOCASA_PANDA_OMRON
-    state_dim = config["state_dim"]  # 14
-    action_dim = config["action_dim"]  # 7
+    # The config is automatically registered when this module is imported
+    # You don't need to manually import it, just pass the embodiment tag:
+    --embodiment-tag ROBOCASA_PANDA_OMRON
+    --modality-config-path gr00t/configs/data/robocasa_modality_config.py
 """
 
 import numpy as np
@@ -348,24 +349,104 @@ def validate_config(config: dict) -> bool:
 # =============================================================================
 
 # =============================================================================
+# Proper ModalityConfig Structure for GR00T
+# =============================================================================
+
+from gr00t.data.types import (
+    ActionConfig,
+    ActionFormat,
+    ActionRepresentation,
+    ActionType,
+    ModalityConfig,
+)
+
+# This is the structure that GR00T expects for modality configs
+ROBOCASA_PANDA_OMRON_CONFIG = {
+    "video": ModalityConfig(
+        delta_indices=[0],  # Single frame observation
+        modality_keys=[
+            "left_view",     # observation.images.left_view
+            "right_view",    # observation.images.right_view
+            "wrist_view",    # observation.images.wrist_view
+        ],
+    ),
+    "state": ModalityConfig(
+        delta_indices=[0],  # Current state only
+        modality_keys=[
+            "end_effector_position_relative",  # 3D position delta
+            "end_effector_rotation_relative",  # Quaternion rotation delta (4D)
+            "joint_position",                   # 7-DOF joint angles
+            "gripper_qpos",                    # 2D gripper position
+        ],
+        # Use sin/cos encoding for joint angles (cyclical)
+        sin_cos_embedding_keys=["joint_position"],
+    ),
+    "action": ModalityConfig(
+        delta_indices=list(range(16)),  # 16-step action horizon
+        modality_keys=[
+            "end_effector_position",    # 3D position delta
+            "end_effector_rotation",    # 3D axis-angle rotation delta
+            "gripper_close",            # Binary gripper command
+        ],
+        action_configs=[
+            # end_effector_position (relative/delta)
+            ActionConfig(
+                rep=ActionRepresentation.RELATIVE,
+                type=ActionType.EEF,
+                format=ActionFormat.DEFAULT,
+            ),
+            # end_effector_rotation (relative/delta, axis-angle format)
+            ActionConfig(
+                rep=ActionRepresentation.RELATIVE,
+                type=ActionType.EEF,
+                format=ActionFormat.XYZ_ROTVEC,  # axis-angle = rotation vector
+            ),
+            # gripper_close (binary: 0=open, 1=close)
+            ActionConfig(
+                rep=ActionRepresentation.ABSOLUTE,
+                type=ActionType.NON_EEF,
+                format=ActionFormat.DEFAULT,
+            ),
+        ],
+    ),
+    "language": ModalityConfig(
+        delta_indices=[0],
+        modality_keys=["annotation.human.action.task_description"],
+    ),
+}
+
+# Keep the metadata for reference (rename original)
+ROBOCASA_PANDA_OMRON_METADATA = ROBOCASA_PANDA_OMRON
+
+# =============================================================================
 # Registration
 # =============================================================================
 
 from gr00t.configs.data.embodiment_configs import register_modality_config
 from gr00t.data.embodiment_tags import EmbodimentTag
 
-register_modality_config(ROBOCASA_PANDA_OMRON, embodiment_tag=EmbodimentTag.ROBOCASA_PANDA_OMRON)
+# Register the proper config structure (not the metadata)
+register_modality_config(ROBOCASA_PANDA_OMRON_CONFIG, embodiment_tag=EmbodimentTag.ROBOCASA_PANDA_OMRON)
 
 
 if __name__ == "__main__":
-    # Validate default config
-    print("Validating ROBOCASA_PANDA_OMRON configuration...")
-    validate_config(ROBOCASA_PANDA_OMRON)
+    # Validate metadata config
+    print("Validating ROBOCASA_PANDA_OMRON_METADATA configuration...")
+    validate_config(ROBOCASA_PANDA_OMRON_METADATA)
 
-    print("\nConfiguration summary:")
-    print(f"  State dim: {ROBOCASA_PANDA_OMRON['state_dim']}")
-    print(f"  Action dim: {ROBOCASA_PANDA_OMRON['action_dim']}")
-    print(f"  Action space: {ROBOCASA_PANDA_OMRON['action_space']}")
-    print(f"  Action horizon: {ROBOCASA_PANDA_OMRON['action_horizon']}")
-    print(f"  Cameras: {list(ROBOCASA_PANDA_OMRON['cameras'].keys())}")
+    print("\nMetadata configuration summary:")
+    print(f"  State dim: {ROBOCASA_PANDA_OMRON_METADATA['state_dim']}")
+    print(f"  Action dim: {ROBOCASA_PANDA_OMRON_METADATA['action_dim']}")
+    print(f"  Action space: {ROBOCASA_PANDA_OMRON_METADATA['action_space']}")
+    print(f"  Action horizon: {ROBOCASA_PANDA_OMRON_METADATA['action_horizon']}")
+    print(f"  Cameras: {list(ROBOCASA_PANDA_OMRON_METADATA['cameras'].keys())}")
+
+    print("\n" + "="*70)
+    print("GR00T ModalityConfig structure:")
+    print("="*70)
+    print(f"  Video keys: {ROBOCASA_PANDA_OMRON_CONFIG['video'].modality_keys}")
+    print(f"  State keys: {ROBOCASA_PANDA_OMRON_CONFIG['state'].modality_keys}")
+    print(f"  Action keys: {ROBOCASA_PANDA_OMRON_CONFIG['action'].modality_keys}")
+    print(f"  Action horizon: {len(ROBOCASA_PANDA_OMRON_CONFIG['action'].delta_indices)}")
+    print(f"  Language keys: {ROBOCASA_PANDA_OMRON_CONFIG['language'].modality_keys}")
     print("\n✓ All checks passed!")
