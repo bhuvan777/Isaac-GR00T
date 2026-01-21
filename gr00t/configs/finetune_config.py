@@ -116,3 +116,13 @@ class FinetuneConfig:
 
     num_shards_per_epoch: int = int(1e5)
     """Number of shards to use for the dataset. reduce this number if vram is limited."""
+
+    # --- SVMS (Sheaf-based Multi-Stream) Configuration ---
+    use_sheaf_streams: bool = False
+    """If True, enable SVMS (Sheaf-based Multi-Stream) architecture for specialized processing."""
+
+    lambda_aux: float = 0.5
+    """Weight for auxiliary supervision loss to encourage stream specialization."""
+
+    lambda_sheaf_max: float = 0.1
+    """Maximum weight for sheaf consistency loss (use 0.0 to disable in Phase 1)."""

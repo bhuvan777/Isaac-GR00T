@@ -96,11 +96,14 @@ fi
 # Training Launch
 # =============================================================================
 
+# Create output directory
+mkdir -p "$OUTPUT_DIR"
+
 echo "Starting Phase 1 training..."
 echo "  Press Ctrl+C to stop"
 echo ""
 
-CUDA_VISIBLE_DEVICES=$CUDA_DEVICE uv run python gr00t/experiment/launch_train.py \
+CUDA_VISIBLE_DEVICES=$CUDA_DEVICE uv run python gr00t/experiment/launch_finetune.py \
     --base-model-path "$BASE_MODEL" \
     --dataset-path "$DATASET_PATH" \
     --embodiment-tag "$EMBODIMENT_TAG" \
@@ -116,15 +119,11 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICE uv run python gr00t/experiment/launch_train.py
     --use-sheaf-streams \
     --lambda-aux $LAMBDA_AUX \
     --lambda-sheaf-max $LAMBDA_SHEAF \
-    --use-aux-losses \
     \
     --save-steps $SAVE_STEPS \
     --save-total-limit $SAVE_TOTAL_LIMIT \
-    --eval-steps $EVAL_STEPS \
     \
     --use-wandb \
-    --wandb-project "$WANDB_PROJECT" \
-    --wandb-run-name "$WANDB_RUN_NAME" \
     \
     --dataloader-num-workers 4 \
     --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \

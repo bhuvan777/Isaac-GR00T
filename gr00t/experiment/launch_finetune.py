@@ -69,6 +69,11 @@ if __name__ == "__main__":
     config.model.backbone_trainable_params_fp32 = True
     config.model.use_relative_action = True
 
+    # SVMS configuration
+    config.model.use_sheaf_streams = ft_config.use_sheaf_streams
+    config.model.lambda_aux = ft_config.lambda_aux
+    config.model.lambda_sheaf_max = ft_config.lambda_sheaf_max
+
     config.training.start_from_checkpoint = ft_config.base_model_path
     config.training.optim = "adamw_torch"
     config.training.global_batch_size = ft_config.global_batch_size
