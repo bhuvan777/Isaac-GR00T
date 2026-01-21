@@ -116,6 +116,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICE uv run python gr00t/experiment/launch_train.py
     --resume-from-checkpoint "$PHASE1_CHECKPOINT" \
     --dataset-path "$DATASET_PATH" \
     --embodiment-tag "$EMBODIMENT_TAG" \
+    --modality-config-path gr00t/configs/data/robocasa_modality_config.py \
     --output-dir "$OUTPUT_DIR" \
     --num-gpus $NUM_GPUS \
     \
