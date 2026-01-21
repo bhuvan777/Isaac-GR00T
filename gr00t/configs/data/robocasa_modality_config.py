@@ -347,6 +347,16 @@ def validate_config(config: dict) -> bool:
 # Module-level validation
 # =============================================================================
 
+# =============================================================================
+# Registration
+# =============================================================================
+
+from gr00t.configs.data.embodiment_configs import register_modality_config
+from gr00t.data.embodiment_tags import EmbodimentTag
+
+register_modality_config(ROBOCASA_PANDA_OMRON, embodiment_tag=EmbodimentTag.ROBOCASA_PANDA_OMRON)
+
+
 if __name__ == "__main__":
     # Validate default config
     print("Validating ROBOCASA_PANDA_OMRON configuration...")

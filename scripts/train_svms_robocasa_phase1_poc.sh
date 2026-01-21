@@ -21,8 +21,8 @@ set -e  # Exit on error
 
 # Model and data paths
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_PATH="<REPLACE_WITH_YOUR_ROBOCASA_DATASET_PATH>"  # TODO: Set your dataset path
-EMBODIMENT_TAG="ROBOCASA_PANDA_OMRON"
+DATASET_PATH="/workspace/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/single_panda_gripper.CloseDoubleDoor"
+EMBODIMENT_TAG="ROBOCASA_PANDA_OMRON"  # RoboCasa Panda robot
 
 # Output directory
 OUTPUT_DIR="./checkpoints_svms/phase1_poc"
