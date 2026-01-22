@@ -21,7 +21,7 @@ set -e  # Exit on error
 
 # Model and data paths
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_PATH="examples/SO100/finish_sandwich_lerobot"
+DATASET_PATH="examples/SO100/izuluaga/finish_sandwich"
 MODALITY_CONFIG_PATH="examples/SO100/so100_config.py"
 EMBODIMENT_TAG="NEW_EMBODIMENT"  # SO100 uses NEW_EMBODIMENT
 
@@ -112,6 +112,9 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICE uv run python gr00t/experiment/launch_finetune
     --gradient-accumulation-steps $GRADIENT_ACCUM_STEPS \
     --learning-rate $LEARNING_RATE \
     --weight-decay $WEIGHT_DECAY \
+    \
+    --tune-projector False \
+    --tune-diffusion-model False \
     \
     --use-sheaf-streams \
     --lambda-aux $LAMBDA_AUX \
